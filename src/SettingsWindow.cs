@@ -11,13 +11,15 @@ internal sealed class SettingsWindow : Window
 {
     private readonly Action quit;
     private readonly List<LabelsView> previews = new();
+    private readonly Action restartElevated;
     private int selectedTab;
     private Button? recordingButton;
     private Action? stopRecording;
 
-    public SettingsWindow(Action quit)
+    public SettingsWindow(Action quit, Action restartElevated)
     {
         this.quit = quit;
+        this.restartElevated = restartElevated;
         Width = 500;
         Height = 640;
         ResizeMode = ResizeMode.NoResize;
@@ -95,6 +97,23 @@ internal sealed class SettingsWindow : Window
         panel.Children.Add(Footer(Tr(
             "Registers the current location of Unmouse.exe. Turn this off and on again after moving the file.",
             "Unmouse.exe의 현재 위치를 등록합니다. 파일을 옮긴 뒤에는 껐다가 다시 켜세요.")));
+        panel.Children.Add(Divider());
+
+        panel.Children.Add(Row(Tr("Privileges", "실행 권한"), new TextBlock
+        {
+            Text = Elevation.IsElevated ? Tr("Administrator", "관리자 권한") : Tr("Standard user", "일반 권한"),
+            FontWeight = FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center,
+        }));
+        if (!Elevation.IsElevated)
+        {
+            panel.Children.Add(Footer(Tr(
+                "Shortcuts, labels, and clicks do not work while a window that runs as administrator has focus, such as Task Manager or an elevated terminal.",
+                "작업 관리자나 관리자 권한 터미널처럼 관리자 권한으로 실행된 창이 포커스를 가진 동안에는 단축키, 라벨, 클릭이 동작하지 않습니다.")));
+            panel.Children.Add(ActionButton(
+                Tr("Restart as Administrator", "관리자 권한으로 다시 시작"), restartElevated));
+            panel.Children.Add(Check(
+                Tr("Show this notice when Unmouse starts", "Unmouse를 시작할 때 이 안내 표시"), "adminHint"));
+        }
         panel.Children.Add(Divider());
 
         string version = typeof(SettingsWindow).Assembly.GetName().Version?.ToString(3) ?? "";

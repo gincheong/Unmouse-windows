@@ -80,6 +80,7 @@ internal static class Settings
         ["language"] = "en",
         ["clickHotkey"] = "Ctrl+'",
         ["includeTaskbar"] = true,
+        ["adminHint"] = true,
         ["scrollEnabled"] = true,
         ["scrollHotkey"] = "Ctrl+Shift+J",
         ["scrollSpeed"] = 2.0,
