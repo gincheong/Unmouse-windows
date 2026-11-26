@@ -81,7 +81,7 @@ internal static class Program
         IntPtr foreground = Native.GetForegroundWindow();
         var mode = scroll ? UiaScanner.Mode.Scroll : UiaScanner.Mode.Click;
         var clock = Stopwatch.StartNew();
-        var targets = UiaScanner.Scan(foreground, mode, includeTaskbar: false, timeout: 10_000);
+        var targets = UiaScanner.Scan(foreground, mode, includeTaskbar: false, timeout: 10_000).Targets;
         clock.Stop();
         MessageBox.Show(
             $"{Native.ClassName(foreground)}: targets {targets.Count}, {clock.ElapsedMilliseconds}ms", "Unmouse");

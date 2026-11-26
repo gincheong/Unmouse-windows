@@ -16,6 +16,9 @@ internal readonly record struct Target(Rect Frame, IUIAutomationElement? Element
     public Point Point => new(Frame.X + Frame.Width / 2, Frame.Y + Frame.Height / 2);
 }
 
+// Late는 제한 시간 안에 끝나지 않은 창이 있을 때만 있고, 그 창들의 결과로 끝난다.
+internal readonly record struct ScanResult(List<Target> Targets, Task<List<Target>>? Late);
+
 internal static class UiaScanner
 {
     public enum Mode { Click, Scroll }
@@ -58,7 +61,8 @@ internal static class UiaScanner
         if (automation is IUIAutomation2 extended)
         {
             extended.ConnectionTimeout = 1000;
-            extended.TransactionTimeout = 1500;
+            // Scan이 늦게 끝나는 창을 기다리는 시간(timeout + LateTimeout)에 맞춘다.
+            extended.TransactionTimeout = 4000;
         }
         return automation;
     });
@@ -87,7 +91,9 @@ internal static class UiaScanner
                 automation.CreatePropertyCondition(ControlTypeProperty, DocumentControlType)));
     });
 
-    public static List<Target> Scan(IntPtr foreground, Mode mode, bool includeTaskbar, int timeout = 1500)
+    private const int LateTimeout = 2500;
+
+    public static ScanResult Scan(IntPtr foreground, Mode mode, bool includeTaskbar, int timeout = 1500)
     {
         var windows = TopLevelWindows.Visible();
         var roots = new List<IntPtr>();
@@ -114,8 +120,32 @@ internal static class UiaScanner
             }
         }
 
-        // 응답이 없는 앱의 호출은 취소할 수 없어서 제한 시간 안에 끝난 창의 결과만 쓴다.
+        // 응답이 없는 앱의 호출은 취소할 수 없어서 제한 시간 안에 끝난 창의 결과를 먼저 돌려준다.
         var tasks = roots.Distinct().Select(root => Task.Run(() => ScanRoot(root, mode))).ToArray();
+        Wait(tasks, timeout);
+        var finished = tasks.Where(task => task.IsCompleted).ToArray();
+        var pending = tasks.Except(finished).ToArray();
+        var targets = Results(finished);
+
+        // 스크롤 영역을 노출하지 않는 앱은 창 전체를 스크롤 대상으로 쓴다.
+        if (mode == Mode.Scroll && targets.Count == 0 && WindowFrame(foreground) is { } frame)
+        {
+            targets.Add(new Target(frame));
+        }
+        Task<List<Target>>? late = null;
+        if (pending.Length > 0)
+        {
+            late = Task.Run(() =>
+            {
+                Wait(pending, LateTimeout);
+                return Finish(Results(pending));
+            });
+        }
+        return new ScanResult(Finish(targets), late);
+    }
+
+    private static void Wait(Task[] tasks, int timeout)
+    {
         try
         {
             Task.WaitAll(tasks, timeout);
@@ -123,15 +153,11 @@ internal static class UiaScanner
         catch (AggregateException)
         {
         }
-        var targets = tasks.Where(task => task.Status == TaskStatus.RanToCompletion)
-            .SelectMany(task => task.Result).ToList();
+    }
 
-        // 스크롤 영역을 노출하지 않는 앱은 창 전체를 스크롤 대상으로 쓴다.
-        if (mode == Mode.Scroll && targets.Count == 0 && WindowFrame(foreground) is { } frame)
-        {
-            targets.Add(new Target(frame));
-        }
-        return Finish(targets);
+    private static List<Target> Results(IEnumerable<Task<List<Target>>> tasks)
+    {
+        return tasks.Where(task => task.Status == TaskStatus.RanToCompletion).SelectMany(task => task.Result).ToList();
     }
 
     // Chromium과 Electron은 요청받기 전에는 웹 콘텐츠의 접근성 트리를 만들지 않는다.

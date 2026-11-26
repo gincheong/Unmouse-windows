@@ -27,6 +27,8 @@ internal sealed class Controller
     private const int MaxWheelDelta = 32760;
     // 부드러운 스크롤을 쓰는 앱은 휠 delta를 누적하므로 같은 방향의 끝 이동을 이 시간 안에 다시 보내지 않는다.
     private const long EdgeWheelInterval = 500;
+    // 새로 포커스된 창에서 라벨을 보여 준 뒤 다시 스캔하기 전에 기다리는 시간(ms)
+    private static readonly int[] RescanDelays = { 400, 800 };
     // 긴 변이 이 길이 이하인 칸은 더 나누지 않고 클릭한다.
     private const double GridStopCell = 28;
     // 한 단계에서 칸을 이 길이보다 잘게 나누지 않는다.
@@ -44,7 +46,10 @@ internal sealed class Controller
 
     private State state = State.Idle;
     private Purpose purpose = Purpose.Click;
-    private int generation;
+    // 다시 스캔하는 스레드 풀 작업도 읽는다.
+    private volatile int generation;
+    // 포커스된 뒤에 이미 스캔한 창. 포커스가 바뀌면 비운다.
+    private IntPtr scannedWindow;
     private List<LabelItem> items = new();
     private string typed = "";
     private readonly HashSet<int> swallowedKeys = new();
@@ -70,7 +75,11 @@ internal sealed class Controller
         this.dispatcher = dispatcher;
         keyboardProc = KeyboardProc;
         mouseProc = MouseProc;
-        foregroundProc = (_, _, hwnd, _, _, _, _) => Task.Run(() => UiaScanner.WarmUp(hwnd));
+        foregroundProc = (_, _, hwnd, _, _, _, _) =>
+        {
+            scannedWindow = IntPtr.Zero;
+            Task.Run(() => UiaScanner.WarmUp(hwnd));
+        };
     }
 
     public bool InstallHooks()
@@ -371,22 +380,74 @@ internal sealed class Controller
         IntPtr foreground = Native.GetForegroundWindow();
         var mode = requested == Purpose.Click ? UiaScanner.Mode.Click : UiaScanner.Mode.Scroll;
         bool includeTaskbar = Settings.IncludeTaskbar;
+        bool click = requested == Purpose.Click;
+        // 새로 포커스된 창은 접근성 트리를 다 만들기 전이라 첫 스캔에 요소가 일부만 나올 수 있다.
+        bool rescan = click && foreground != scannedWindow;
+        scannedWindow = foreground;
 
         Task.Run(() =>
         {
-            var targets = UiaScanner.Scan(foreground, mode, includeTaskbar);
-            dispatcher.InvokeAsync(() =>
+            void Report(List<Target> targets, bool final)
             {
-                if (state != State.Scanning || generation != current) return;
-                if (targets.Count == 0)
-                {
-                    state = State.Idle;
-                    Native.MessageBeep(0);
-                    return;
-                }
-                Present(targets);
-            });
+                dispatcher.InvokeAsync(() => Receive(current, targets, final));
+            }
+            var result = UiaScanner.Scan(foreground, mode, includeTaskbar);
+            // 스크롤 영역은 숫자 키로 고르기 때문에 보여 준 뒤에는 바꾸지 않는다.
+            if (!click)
+            {
+                Report(result.Targets, true);
+                return;
+            }
+            Report(result.Targets, result.Late == null && !rescan);
+            if (result.Late is { } late) Report(late.Result, !rescan);
+            if (!rescan) return;
+            for (int index = 0; index < RescanDelays.Length; index++)
+            {
+                Thread.Sleep(RescanDelays[index]);
+                if (generation != current) return;
+                var again = UiaScanner.Scan(foreground, mode, includeTaskbar).Targets;
+                Report(again, index == RescanDelays.Length - 1);
+            }
         });
+    }
+
+    // final은 이번 활성화에서 더 받을 결과가 없다는 뜻이다.
+    private void Receive(int current, List<Target> targets, bool final)
+    {
+        if (generation != current) return;
+        if (state == State.Scanning)
+        {
+            if (targets.Count > 0)
+            {
+                Present(targets);
+            }
+            else if (final)
+            {
+                state = State.Idle;
+                generation += 1;
+                Native.MessageBeep(0);
+            }
+        }
+        else if (state == State.Picking && purpose == Purpose.Click)
+        {
+            AddTargets(targets);
+        }
+    }
+
+    private void AddTargets(List<Target> targets)
+    {
+        static bool Same(Point first, Point second)
+        {
+            return Math.Abs(first.X - second.X) < 4 && Math.Abs(first.Y - second.Y) < 4;
+        }
+        var added = targets.Where(target => !items.Any(item => Same(item.Target.Point, target.Point))).ToList();
+        if (added.Count == 0) return;
+        var labels = LabelGenerator.Extend(
+            items.Select(item => item.Label).ToList(), added.Count, Settings.LabelCharacters);
+        items = labels.Zip(items.Select(item => item.Target).Concat(added), (label, target) => new LabelItem(label, target))
+            .ToList();
+        overlay.Show(items);
+        if (typed.Length > 0) overlay.Update(typed);
     }
 
     private void Present(List<Target> targets)

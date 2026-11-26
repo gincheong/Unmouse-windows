@@ -413,4 +413,32 @@ internal static class LabelGenerator
         return hints.GetRange(offset, count).OrderBy(hint => hint, StringComparer.Ordinal)
             .Select(hint => new string(hint.Reverse().ToArray())).ToList();
     }
+
+    // 이미 보여 준 라벨 뒤에 count개를 더한 목록을 돌려준다. 기존 라벨은 그대로 두거나 뒤에 글자만 붙여서,
+    // 바뀌기 전 라벨을 입력해도 다른 대상이 선택되지 않는다.
+    public static List<string> Extend(IReadOnlyList<string> existing, int count, IReadOnlyList<char> characters)
+    {
+        var labels = existing.ToList();
+        int total = existing.Count + count;
+        while (labels.Count < total)
+        {
+            var used = new HashSet<string>(labels);
+            var prefixes = new HashSet<string> { "" };
+            foreach (string label in labels)
+            {
+                for (int length = 1; length < label.Length; length++) prefixes.Add(label[..length]);
+            }
+            var free = prefixes.OrderBy(prefix => prefix.Length).ThenBy(prefix => prefix, StringComparer.Ordinal)
+                .SelectMany(prefix => characters.Select(character => prefix + character))
+                .Where(candidate => !used.Contains(candidate) && !prefixes.Contains(candidate))
+                .Distinct().Take(total - labels.Count).ToList();
+            labels.AddRange(free);
+            if (labels.Count >= total || characters.Count < 2) break;
+            // 빈 자리가 없으면 가장 짧은 라벨 하나에 글자를 붙여서 그 아래에 자리를 만든다.
+            int shortest = labels.Min(label => label.Length);
+            int extended = labels.FindLastIndex(label => label.Length == shortest);
+            labels[extended] += characters[0];
+        }
+        return labels;
+    }
 }
