@@ -10,7 +10,8 @@ using Rect = System.Windows.Rect;
 namespace Unmouse;
 
 // 화면에 보이는 영역. 물리 픽셀 기준의 가상 화면 좌표다.
-internal readonly record struct Target(Rect Frame)
+// Element는 ScrollPattern으로 세로 스크롤할 수 있는 영역에만 들어 있다.
+internal readonly record struct Target(Rect Frame, IUIAutomationElement? Element = null)
 {
     public Point Point => new(Frame.X + Frame.Width / 2, Frame.Y + Frame.Height / 2);
 }
@@ -30,6 +31,10 @@ internal static class UiaScanner
     private const int IsTogglePatternAvailableProperty = 30041;
     private const int HorizontallyScrollableProperty = 30057;
     private const int VerticallyScrollableProperty = 30058;
+
+    private const int ScrollPatternId = 10004;
+    // SetScrollPercent에서 해당 축을 움직이지 않게 하는 값
+    private const double NoScroll = -1;
 
     private const int TextControlType = 50020;
     private const int DocumentControlType = 50030;
@@ -145,6 +150,22 @@ internal static class UiaScanner
         }
     }
 
+    // 대상 앱의 응답을 기다리므로 스레드 풀에서 호출한다. 실패하면 false를 돌려준다.
+    public static bool ScrollToEdge(IUIAutomationElement? element, bool bottom)
+    {
+        if (element == null) return false;
+        try
+        {
+            if (element.GetCurrentPattern(ScrollPatternId) is not IUIAutomationScrollPattern pattern) return false;
+            pattern.SetScrollPercent(NoScroll, bottom ? 100 : 0);
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
     private static List<Target> ScanRoot(IntPtr hwnd, Mode mode)
     {
         var targets = new List<Target>();
@@ -164,8 +185,12 @@ internal static class UiaScanner
                 request.AddProperty(HorizontallyScrollableProperty);
                 request.AddProperty(VerticallyScrollableProperty);
             }
-            // 캐시한 속성만 읽으므로 요소마다 원격 참조를 만들지 않게 한다.
-            request.AutomationElementMode = AutomationElementMode.AutomationElementMode_None;
+            // 클릭 모드는 캐시한 속성만 읽으므로 요소마다 원격 참조를 만들지 않게 한다.
+            // 스크롤 모드는 ScrollPattern을 호출해야 해서 참조를 유지한다.
+            if (mode == Mode.Click)
+            {
+                request.AutomationElementMode = AutomationElementMode.AutomationElementMode_None;
+            }
 
             var condition = mode == Mode.Click ? ClickCondition.Value : ScrollCondition.Value;
             var found = root.FindAllBuildCache(TreeScope.TreeScope_Descendants, condition, request);
@@ -184,10 +209,10 @@ internal static class UiaScanner
                 if (mode == Mode.Scroll)
                 {
                     if (visible.Width < 50 || visible.Height < 50) continue;
-                    bool scrollable = type == DocumentControlType
-                        || element.GetCachedPropertyValue(HorizontallyScrollableProperty) is true
-                        || element.GetCachedPropertyValue(VerticallyScrollableProperty) is true;
-                    if (scrollable) targets.Add(new Target(visible));
+                    bool vertical = element.GetCachedPropertyValue(VerticallyScrollableProperty) is true;
+                    bool scrollable = type == DocumentControlType || vertical
+                        || element.GetCachedPropertyValue(HorizontallyScrollableProperty) is true;
+                    if (scrollable) targets.Add(new Target(visible, vertical ? element : null));
                     continue;
                 }
 

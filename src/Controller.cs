@@ -25,6 +25,8 @@ internal sealed class Controller
     private const double WheelPerPixel = 1.2;
     // WM_MOUSEWHEEL의 delta는 16비트 부호 있는 정수로 전달된다.
     private const int MaxWheelDelta = 32760;
+    // 부드러운 스크롤을 쓰는 앱은 휠 delta를 누적하므로 같은 방향의 끝 이동을 이 시간 안에 다시 보내지 않는다.
+    private const long EdgeWheelInterval = 500;
     // 긴 변이 이 길이 이하인 칸은 더 나누지 않고 클릭한다.
     private const double GridStopCell = 28;
     // 한 단계에서 칸을 이 길이보다 잘게 나누지 않는다.
@@ -49,6 +51,9 @@ internal sealed class Controller
 
     private List<Target> scrollTargets = new();
     private Rect scrollFrame;
+    private Interop.UIAutomationClient.IUIAutomationElement? scrollElement;
+    // 위쪽과 아래쪽 끝으로 마지막에 휠을 보낸 시각
+    private readonly long[] edgeWheelTime = new long[2];
     private readonly Dictionary<int, Vector> heldScroll = new();
     private bool scrollFast;
     private Vector scrollRemainder;
@@ -288,6 +293,7 @@ internal sealed class Controller
         bool arrows = Settings.ScrollArrowKeys;
         Vector? direction = null;
         double? jump = null;
+        bool? edge = null;
         // 휠 delta와 같은 부호를 쓴다. 세로는 양수가 위쪽, 가로는 양수가 오른쪽이다.
         switch (key)
         {
@@ -301,7 +307,7 @@ internal sealed class Controller
             case KeyCodes.Right when arrows: direction = new Vector(1, 0); break;
             case 0x20: jump = -scrollFrame.Height / 2 * WheelPerPixel; break;  // d
             case 0x16: jump = scrollFrame.Height / 2 * WheelPerPixel; break;  // u
-            case 0x22: jump = modifiers.Shift ? -1_000_000 : 1_000_000; break;  // g
+            case 0x22: edge = modifiers.Shift; break;  // g는 맨 위, Shift+g는 맨 아래
         }
         bool hasShortcutModifier = modifiers.Ctrl || modifiers.Alt || modifiers.Win;
         // 숫자 키 1~9의 스캔 코드는 0x02부터 이어진다.
@@ -312,7 +318,7 @@ internal sealed class Controller
             SelectScrollTarget(digit);
             return true;
         }
-        if (hasShortcutModifier || (direction == null && jump == null))
+        if (hasShortcutModifier || (direction == null && jump == null && edge == null))
         {
             // 스크롤 키가 아니면 모드를 끝내고 키를 그대로 전달해서 타이핑이 사라지지 않게 한다.
             Deactivate();
@@ -329,7 +335,26 @@ internal sealed class Controller
         {
             PostScroll(0, (int)amount);
         }
+        else if (edge is { } bottom && !autorepeat)
+        {
+            ScrollToEdge(bottom);
+        }
         return true;
+    }
+
+    private void ScrollToEdge(bool bottom)
+    {
+        var element = scrollElement;
+        Task.Run(() =>
+        {
+            if (UiaScanner.ScrollToEdge(element, bottom)) return;
+            // ScrollPattern이 없는 영역은 휠 이벤트 하나로 보낼 수 있는 최대 delta만 보낸다.
+            int slot = bottom ? 1 : 0;
+            long now = Environment.TickCount64;
+            if (now - Interlocked.Read(ref edgeWheelTime[slot]) < EdgeWheelInterval) return;
+            Interlocked.Exchange(ref edgeWheelTime[slot], now);
+            Native.SendMouse(Native.MOUSEEVENTF_WHEEL, bottom ? -MaxWheelDelta : MaxWheelDelta);
+        });
     }
 
     private void Activate(Purpose requested)
@@ -501,6 +526,7 @@ internal sealed class Controller
     {
         var target = scrollTargets[index];
         scrollFrame = target.Frame;
+        scrollElement = target.Element;
         heldScroll.Clear();
 
         // 휠 이벤트는 커서 아래의 창으로 전달되므로 커서를 선택한 영역 안으로 옮긴다.
@@ -563,6 +589,7 @@ internal sealed class Controller
         typed = "";
         gridPath.Clear();
         scrollTargets = new List<Target>();
+        scrollElement = null;
         heldScroll.Clear();
         scrollTimer?.Stop();
         scrollTimer = null;
