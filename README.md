@@ -40,3 +40,7 @@ Waits three seconds, then reports how many targets the focused window has and ho
 
 - Windows that run as administrator are not scanned and do not receive clicks unless Unmouse also runs as administrator.
 - Apps that expose no UI Automation tree show no labels. Use grid mode there.
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md).
